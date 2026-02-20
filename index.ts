@@ -7,7 +7,11 @@ import { step2CreateWalletsAndDistribute } from "./layout/step2CreateWalletsAndD
 import { step3MintKeypairAndTokenInfo } from "./layout/step3MintKeypairAndTokenInfo";
 import { step4CreateAtas } from "./layout/step4CreateAtas";
 import { runCreateTokenAndBundleBuy } from "./flows/createTokenAndBundleBuy";
+import { runBundleBuyOnly } from "./flows/bundleBuyOnly";
 import { runGatherSol } from "./flows/gatherSol";
+import { runCloseAtasAndGatherSol } from "./flows/closeAtasAndGatherSol";
+import { runCloseAllLookupTables } from "./flows/closeAllLookupTables";
+import { runCreateTokenAndAtasOnly } from "./flows/createTokenAndAtasOnly";
 
 export function init() {
   screenClear();
@@ -35,6 +39,18 @@ export function init() {
         runGatherSol();
         break;
       case 7:
+        runBundleBuyOnly();
+        break;
+      case 8:
+        runCloseAtasAndGatherSol();
+        break;
+      case 9:
+        runCloseAllLookupTables();
+        break;
+      case 10:
+        runCreateTokenAndAtasOnly();
+        break;
+      case 11:
         process.exit(0);
         break;
       default:

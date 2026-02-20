@@ -7,6 +7,25 @@ import { TokenInfo } from "../core/types";
 
 const MINT_KEYPAIR_DIR = "wallets";
 const MINT_KEYPAIR_FILENAME = "mint-keypair.json";
+const METAPLEX_NAME_MAX = 32;
+const METAPLEX_SYMBOL_MAX = 10;
+const METAPLEX_URI_MAX = 200;
+
+function validateTokenMetadataOrThrow(name: string, symbol: string, uri: string): void {
+  if (name.length === 0) throw new Error("TOKEN_NAME is empty");
+  if (symbol.length === 0) throw new Error("TOKEN_SYMBOL is empty");
+  if (uri.length === 0) throw new Error("TOKEN_URI is empty");
+
+  if (name.length > METAPLEX_NAME_MAX) {
+    throw new Error(`TOKEN_NAME too long (${name.length}/${METAPLEX_NAME_MAX}).`);
+  }
+  if (symbol.length > METAPLEX_SYMBOL_MAX) {
+    throw new Error(`TOKEN_SYMBOL too long (${symbol.length}/${METAPLEX_SYMBOL_MAX}).`);
+  }
+  if (uri.length > METAPLEX_URI_MAX) {
+    throw new Error(`TOKEN_URI too long (${uri.length}/${METAPLEX_URI_MAX}).`);
+  }
+}
 
 export function createMintKeypair(): Keypair {
   ensureWalletsDir();
@@ -33,6 +52,8 @@ export function loadMintKeypair(): Keypair | null {
 }
 
 export function getTokenInfo(): TokenInfo {
+  validateTokenMetadataOrThrow(TOKEN_NAME, TOKEN_SYMBOL, TOKEN_URI);
+
   return {
     name: TOKEN_NAME,
     symbol: TOKEN_SYMBOL,

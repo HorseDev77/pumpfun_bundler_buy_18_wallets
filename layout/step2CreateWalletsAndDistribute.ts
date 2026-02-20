@@ -16,6 +16,6 @@ export async function step2CreateWalletsAndDistribute() {
   }
   const keypairs = loadBundlerKeypairs(wallets).slice(0, BUNDLER_WALLET_COUNT);
   console.log("Bundler wallets:", keypairs.length);
-  await distributeSolToWallets(mainWallet, keypairs);
+  //await distributeSolToWallets(mainWallet, keypairs);
   mainMenuWait(init);
 }

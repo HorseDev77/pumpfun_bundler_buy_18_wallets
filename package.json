@@ -5,7 +5,9 @@
   "main": "dist/index.js",
   "scripts": {
     "start": "ts-node index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "test:curve": "ts-node scripts/test-bonding-curve.ts",
+    "fetch-lut": "ts-node scripts/fetchLookupTables.ts"
   },
   "dependencies": {
     "@pump-fun/pump-sdk": "^1.28.0",

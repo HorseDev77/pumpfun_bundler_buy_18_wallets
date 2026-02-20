@@ -10,7 +10,7 @@ import { SOL_DISTRIBUTE_MIN, SOL_DISTRIBUTE_MAX } from "../config";
 import { randomInRange, sleep, waitForConfirmation } from "../core/utils";
 
 const BATCH_SIZE = 8;
-const RENT_BUFFER_SOL = 0.005;
+const RENT_BUFFER_SOL = 0.0005;
 
 function randomLamports(minSol: number, maxSol: number): number {
   const sol = randomInRange(minSol, maxSol);

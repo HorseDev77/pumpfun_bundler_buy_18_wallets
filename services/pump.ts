@@ -3,14 +3,13 @@ import {
   OnlinePumpSdk,
   getBuyTokenAmountFromSolAmount,
   bondingCurvePda,
-  newBondingCurve,
   BONDING_CURVE_NEW_SIZE,
   PUMP_PROGRAM_ID,
 } from "@pump-fun/pump-sdk";
 import {
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
-  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
@@ -22,11 +21,10 @@ import {
   TOKEN_NAME,
   TOKEN_SYMBOL,
   TOKEN_URI,
-  isDevnet,
 } from "../config";
 import { randomInRange } from "../core/utils";
 
-/** Fee recipients authorized by the Pump program (devnet may not use global.feeRecipient). */
+/** Fee recipients authorized by the Pump program (devnet / fallback). */
 const STATIC_FEE_RECIPIENTS = [
   "62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV",
   "7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ",
@@ -64,29 +62,45 @@ export async function fetchGlobal() {
   return onlineSdk.fetchGlobal();
 }
 
+/** Fetch bonding curve for an existing token and return the creator pubkey (for bundle-buy-only flow). */
+export async function fetchBondingCurveCreator(mint: PublicKey): Promise<PublicKey> {
+  const bondingCurve = await onlineSdk.fetchBondingCurve(mint);
+  return bondingCurve.creator;
+}
+
+/** Resolve token program from mint account (mint.owner). Required so buy uses correct associated_bonding_curve PDA. */
+export async function getTokenProgramForMint(mint: PublicKey): Promise<PublicKey> {
+  const info = await connection.getAccountInfo(mint);
+  if (!info) throw new Error("Mint account not found");
+  return info.owner;
+}
+
 /** Create token only (no buy). Creator gets ATA. Run this first, then create ATAs for bundler, then dev buy by bundler. */
 export async function createTokenOnlyInstructions(
   mint: PublicKey,
   creator: PublicKey
 ): Promise<{ instructions: import("@solana/web3.js").TransactionInstruction[] }> {
-  const createIx = await sdk.createInstruction({
+  const createIx = await sdk.createV2Instruction({
     mint,
     name: TOKEN_NAME,
     symbol: TOKEN_SYMBOL,
     uri: TOKEN_URI,
     creator,
     user: creator,
+    mayhemMode: false,
+    cashback: false,
   });
   const extendIx = await sdk.extendAccountInstruction({
     account: bondingCurvePda(mint),
     user: creator,
   });
-  const associatedUser = getAssociatedTokenAddressSync(mint, creator, true);
+  const associatedUser = getAssociatedTokenAddressSync(mint, creator, true, TOKEN_2022_PROGRAM_ID);
   const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
     creator,
     associatedUser,
     creator,
-    mint
+    mint,
+    TOKEN_2022_PROGRAM_ID
   );
   return {
     instructions: [createIx, extendIx, createAtaIx],
@@ -108,7 +122,7 @@ export async function createAndBuyInstructions(
     bondingCurve: null,
     amount: solAmount,
   });
-  const instructions = await sdk.createAndBuyInstructions({
+  const instructions = await sdk.createV2AndBuyInstructions({
     global,
     mint,
     name: TOKEN_NAME,
@@ -118,6 +132,8 @@ export async function createAndBuyInstructions(
     user,
     amount,
     solAmount,
+    mayhemMode: false,
+    cashback: false,
   });
   return { instructions };
 }
@@ -148,85 +164,63 @@ export async function buyInstructionsForUser(
     solAmount,
     amount,
     slippage: 2,
-    tokenProgram: TOKEN_PROGRAM_ID,
+    tokenProgram: TOKEN_2022_PROGRAM_ID,
   });
   return { instructions };
 }
 
 /**
- * Build buy instructions for a bundle where the token is created in tx 1.
- * Uses initial bonding curve state (no on-chain fetch) so we can build before the bundle is sent.
- * When ataAlreadyCreated is true (ATAs created in earlier bundle txs), returns only the buy instruction so multiple buys fit in one tx.
+ * Build buy instructions for bundle (Token-2022 or legacy from mint.owner).
+ * Uses sdk.buyInstructions() so tokenProgram is passed through to associated_bonding_curve.
+ * When ataAlreadyCreated is true, only the buy instruction is returned (no create ATA).
+ * Fetches global and the token's bonding curve from chain so fee recipient matches the
+ * program (getFeeRecipient(global, bondingCurve.isMayhemMode)).
  */
 export async function buyInstructionsForUserInBundle(
   mint: PublicKey,
-  creator: PublicKey,
+  _creator: PublicKey,
   user: PublicKey,
   solAmountSol: number,
-  opts?: { ataAlreadyCreated?: boolean; feeRecipient?: PublicKey }
+  opts?: { ataAlreadyCreated?: boolean; feeRecipient?: PublicKey; tokenProgram?: PublicKey }
 ): Promise<{ instructions: import("@solana/web3.js").TransactionInstruction[] }> {
-  const global = await fetchGlobal();
-  const initialCurve = newBondingCurve(global);
-  initialCurve.creator = creator;
+  const tokenProgram = opts?.tokenProgram ?? (await getTokenProgramForMint(mint));
+  const [global, curveAccountInfo] = await Promise.all([
+    fetchGlobal(),
+    connection.getAccountInfo(bondingCurvePda(mint)),
+  ]);
+  if (!curveAccountInfo) {
+    throw new Error(`Bonding curve not found for mint: ${mint.toBase58()}`);
+  }
+  const bondingCurve = sdk.decodeBondingCurve(curveAccountInfo);
+
   const solAmountLamports = new BN(Math.floor(solAmountSol * LAMPORTS_PER_SOL));
   const amount = getBuyTokenAmountFromSolAmount({
     global,
     feeConfig: null,
-    mintSupply: global.tokenTotalSupply,
-    bondingCurve: initialCurve,
+    mintSupply: bondingCurve.tokenTotalSupply,
+    bondingCurve,
     amount: solAmountLamports,
   });
   const solAmountWithSlippage = solAmountLamports.add(
     solAmountLamports.muln(Math.floor(SLIPPAGE_FRACTION * 1000)).divn(1000)
   );
 
-  const feeRecipient = opts?.feeRecipient ?? getFeeRecipientFromGlobal(global);
-  const buyIx = await sdk.getBuyInstructionRaw({
-    user,
-    mint,
-    creator,
-    amount,
-    solAmount: solAmountWithSlippage,
-    feeRecipient,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  });
+  const associatedUserAccountInfo =
+    opts?.ataAlreadyCreated
+      ? ({ data: Buffer.alloc(1), executable: false, owner: tokenProgram, lamports: 0, rentEpoch: 0 } as import("@solana/web3.js").AccountInfo<Buffer>)
+      : null;
 
- 
-
-  if (opts?.ataAlreadyCreated) {
-    return { instructions: [buyIx] };
-  }
-
-  if (isDevnet) {
-    const associatedUser = getAssociatedTokenAddressSync(mint, user, true);
-    // const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-    //   user,
-    //   associatedUser,
-    //   user,
-    //   mint
-    // );
-    return { instructions: [ buyIx] };
-  }
-
-  const fakeBondingCurveAccountInfo: import("@solana/web3.js").AccountInfo<Buffer> = {
-    data: Buffer.alloc(BONDING_CURVE_NEW_SIZE),
-    executable: false,
-    owner: PUMP_PROGRAM_ID,
-    lamports: 0,
-    rentEpoch: 0,
-  };
-  
   const instructions = await sdk.buyInstructions({
     global,
-    bondingCurveAccountInfo: fakeBondingCurveAccountInfo,
-    bondingCurve: initialCurve,
-    associatedUserAccountInfo: null,
+    bondingCurveAccountInfo: curveAccountInfo,
+    bondingCurve,
+    associatedUserAccountInfo,
     mint,
     user,
     solAmount: solAmountWithSlippage,
     amount,
     slippage: 0,
-    tokenProgram: TOKEN_PROGRAM_ID,
+    tokenProgram,
   });
   return { instructions };
 }

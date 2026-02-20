@@ -4,10 +4,9 @@ import { readBundlerWallets } from "../core/utils";
 import { gatherSolToMain } from "../services/gatherSol";
 import { mainMenuWait } from "../core/utils";
 import { init } from "../index";
-import { BUNDLER_WALLET_COUNT } from "../config";
 
 export async function runGatherSol() {
-  console.log("=== Gather SOL from bundler wallets ===\n");
+  console.log("=== Gather SOL from all bundler wallets (bundler.json) ===\n");
 
   const { keypair: mainWallet } = await checkMainWalletBalance();
   const bundlerWallets = readBundlerWallets("bundler");
@@ -17,8 +16,8 @@ export async function runGatherSol() {
     return;
   }
 
-  const bundlerKeypairs = loadBundlerKeypairs(bundlerWallets).slice(0, BUNDLER_WALLET_COUNT);
-  console.log("Bundler wallets:", bundlerKeypairs.length);
+  const bundlerKeypairs = loadBundlerKeypairs(bundlerWallets);
+  console.log("Bundler wallets (all in bundler.json):", bundlerKeypairs.length);
 
   const { gatheredSol, txCount } = await gatherSolToMain(mainWallet, bundlerKeypairs);
   console.log(`Gathered ${gatheredSol.toFixed(6)} SOL in ${txCount} tx(s).`);

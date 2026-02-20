@@ -3,12 +3,18 @@ import {
   PublicKey,
   SystemProgram,
   TransactionMessage,
+  TransactionInstruction,
   VersionedTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import axios, { AxiosError } from "axios";
 import { connection } from "../config";
-import { JITO_FEE_LAMPORTS, JITO_BLOCK_ENGINE_URL, isMainnet } from "../config";
+import {
+  JITO_FEE_LAMPORTS,
+  JITO_BLOCK_ENGINE_URL,
+  isMainnet,
+  JITO_SIMULATE_ONLY,
+} from "../config";
 import { waitForConfirmation } from "../core/utils";
 
 const JITO_TIP_ACCOUNTS = [
@@ -22,38 +28,84 @@ const JITO_TIP_ACCOUNTS = [
   "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
 ];
 
+/** Jito tip account addresses for LUT (mainnet). */
+export function getJitoTipAccountPublicKeys(): PublicKey[] {
+  return JITO_TIP_ACCOUNTS.map((a) => new PublicKey(a));
+}
+
+/** Returns the Jito tip transfer instruction to prepend to the first bundle tx (mainnet). */
+export function getJitoTipInstruction(payer: PublicKey): TransactionInstruction {
+  const tipAccounts = getJitoTipAccountPublicKeys();
+  const tipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
+  return SystemProgram.transfer({
+    fromPubkey: payer,
+    toPubkey: tipAccount,
+    lamports: JITO_FEE_LAMPORTS,
+  });
+}
+
 export interface JitoBundleResult {
   confirmed: boolean;
   tipSignature?: string;
+  simulationPassed?: boolean;
+}
+
+/** Simulate only the first bundle tx (create token). Later txs depend on tx 1's mint so they fail simulation with "Invalid Mint" against current state. */
+export async function simulateBundle(
+  transactions: VersionedTransaction[]
+): Promise<{ success: boolean; failedIndex?: number; error?: string; logs?: string[] }> {
+  if (transactions.length === 0) return { success: true };
+  try {
+    const result = await connection.simulateTransaction(transactions[1], {
+      sigVerify: false,
+      replaceRecentBlockhash: true,
+    });
+    const err = result.value.err;
+    if (err) {
+      const logs = result.value.logs ?? [];
+      return {
+        success: false,
+        failedIndex: 0,
+        error: typeof err === "object" ? JSON.stringify(err) : String(err),
+        logs,
+      };
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, failedIndex: 0, error: msg };
+  }
+  return { success: true };
 }
 
 export async function sendJitoBundle(
   transactions: VersionedTransaction[],
-  tipPayer: Keypair
+  _tipPayer: Keypair
 ): Promise<JitoBundleResult> {
   if (!isMainnet) {
     console.log("Jito bundle skipped (devnet). Submit txs manually if needed.");
     return { confirmed: false };
   }
 
-  const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
-  const { blockhash } = await connection.getLatestBlockhash("confirmed");
-  const tipMessage = new TransactionMessage({
-    payerKey: tipPayer.publicKey,
-    recentBlockhash: blockhash,
-    instructions: [
-      SystemProgram.transfer({
-        fromPubkey: tipPayer.publicKey,
-        toPubkey: new PublicKey(tipAccount),
-        lamports: JITO_FEE_LAMPORTS,
-      }),
-    ],
-  }).compileToV0Message();
-  const tipTx = new VersionedTransaction(tipMessage);
-  tipTx.sign([tipPayer]);
-  const tipSignature = bs58.encode(tipTx.signatures[0]);
+  console.log("Simulating bundle (tx 1 only; later txs depend on mint from tx 1)...");
+  const sim = await simulateBundle(transactions);
+  if (!sim.success) {
+    console.error(
+      "Bundle simulation failed at tx",
+      (sim.failedIndex ?? 0) + 1,
+      ":",
+      sim.error
+    );
+    if (sim.logs?.length) console.error("Logs:", sim.logs.slice(-20).join("\n"));
+    return { confirmed: false, simulationPassed: false };
+  }
+  console.log("Bundle simulation passed.");
 
-  const serialized = [bs58.encode(tipTx.serialize()), ...transactions.map((t) => bs58.encode(t.serialize()))];
+  if (JITO_SIMULATE_ONLY) {
+    console.log("JITO_SIMULATE_ONLY=true: skipping send to Jito.");
+    return { confirmed: false, simulationPassed: true };
+  }
+
+  const serialized = transactions.map((t) => bs58.encode(t.serialize()));
 
   try {
     const { data } = await axios.post(
@@ -62,12 +114,13 @@ export async function sendJitoBundle(
       { timeout: 15_000 }
     );
     if (data?.result?.value) {
-      await waitForConfirmation(tipSignature, { timeoutMs: 60_000 });
-      return { confirmed: true, tipSignature };
+      const firstSig = bs58.encode(transactions[0].signatures[0]);
+      await waitForConfirmation(firstSig, { timeoutMs: 60_000 });
+      return { confirmed: true, tipSignature: firstSig, simulationPassed: true };
     }
   } catch (e) {
     if (e instanceof AxiosError) console.error("Jito bundle error:", e.message);
     else console.error(e);
   }
-  return { confirmed: false };
+  return { confirmed: false, simulationPassed: true };
 }

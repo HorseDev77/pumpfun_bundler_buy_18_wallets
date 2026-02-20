@@ -18,12 +18,12 @@ export async function step4CreateAtas() {
     mainMenuWait(init);
     return;
   }
-  const mintInfo = await connection.getAccountInfo(mintKp.publicKey);
-  if (!mintInfo) {
-    console.log("Mint account does not exist on-chain yet. Create the token first (Step 5 full flow), then run this step.");
-    mainMenuWait(init);
-    return;
-  }
+  // const mintInfo = await connection.getAccountInfo(mintKp.publicKey);
+  // if (!mintInfo) {
+  //   console.log("Mint account does not exist on-chain yet. Create the token first (Step 5 full flow), then run this step.");
+  //   mainMenuWait(init);
+  //   return;
+  // }
   const wallets = readBundlerWallets("bundler");
   if (wallets.length === 0) {
     console.log("Run Step 2 first to create bundler wallets.");
@@ -32,10 +32,10 @@ export async function step4CreateAtas() {
   }
   const mainWallet = loadMainWallet();
   const keypairs = loadBundlerKeypairs(wallets);
-  const lutAddr = readLUTAddress();
-  const lutMint = readLUTMint();
-  const useLut = lutAddr && lutMint === mintKp.publicKey.toBase58();
-  const lookupTable = useLut ? await getLookupTableAccount(new PublicKey(lutAddr!)) : null;
-  await createAtasForWallets(mintKp.publicKey, keypairs, mainWallet, lookupTable ?? undefined);
+  // const lutAddr = readLUTAddress();
+  // const lutMint = readLUTMint();
+  // const useLut = lutAddr && lutMint === mintKp.publicKey.toBase58();
+  // const lookupTable = useLut ? await getLookupTableAccount(new PublicKey(lutAddr!)) : null;
+   await createAtasForWallets(mintKp.publicKey, keypairs, mainWallet,  undefined);
   mainMenuWait(init);
 }
