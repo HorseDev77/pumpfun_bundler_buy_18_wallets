@@ -212,9 +212,9 @@ export async function collectLUTAddresses(
 
   // Jito tip accounts (mainnet: first tx includes tip instruction)
   if (isMainnet) {
-    for (const tipAccount of getJitoTipAccountPublicKeys()) {
-      add(tipAccount);
-    }
+    // for (const tipAccount of getJitoTipAccountPublicKeys()) {
+    //   add(tipAccount);
+    // }
     for (const tipAccount of getBloxRouteTipAccountPublicKeys()) {
       add(tipAccount);
     }

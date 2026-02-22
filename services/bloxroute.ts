@@ -1,128 +1,159 @@
 import {
+  Connection,
   Keypair,
-  PublicKey,
-  SystemProgram,
-  TransactionInstruction,
   VersionedTransaction,
-} from "@solana/web3.js";
-import axios, { AxiosError } from "axios";
-import {
-  BLOXROUTE_API_URL,
-  BLOXROUTE_AUTH_HEADER,
-  BLOXROUTE_TIP_LAMPORTS,
-  isMainnet,
-} from "../config";
-import { waitForConfirmation } from "../core/utils";
-import { simulateBundle } from "./jito";
+  TransactionMessage,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  TransactionInstruction,
+} from '@solana/web3.js';
+import axios, { AxiosResponse } from 'axios';
+import { connection } from '../config';
 
-/** Official BloxRoute tip-receiving addresses (rotate to reduce contention). Min tip 0.001 SOL. */
+/**
+ * BloxRoute Constants
+ */
+export const BLOXROUTE_SUBMIT_BATCH_URL = 'https://germany.solana.dex.blxrbdn.com/api/v2/submit-batch';
+export const DEFAULT_TIP_AMOUNT_SOL = 0.001;
 export const BLOXROUTE_TIP_ACCOUNTS = [
-  "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY",
+  'HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY'
 ];
 
-/** BloxRoute tip account pubkeys for LUT (mainnet). */
+/** Return BloxRoute tip account public keys (for LUT / tip instruction). */
 export function getBloxRouteTipAccountPublicKeys(): PublicKey[] {
   return BLOXROUTE_TIP_ACCOUNTS.map((a) => new PublicKey(a));
 }
 
-/** Returns the BloxRoute tip transfer instruction (add first in tx, before create ATA + buy). */
+/** Create a single tip instruction (embed in any tx). */
 export function getBloxRouteTipInstruction(payer: PublicKey): TransactionInstruction {
-  const tipAccount =
-    BLOXROUTE_TIP_ACCOUNTS[Math.floor(Math.random() * BLOXROUTE_TIP_ACCOUNTS.length)];
+  const tipAccount = BLOXROUTE_TIP_ACCOUNTS[Math.floor(Math.random() * BLOXROUTE_TIP_ACCOUNTS.length)];
+  if (!tipAccount) throw new Error('BloxRoute: no tip accounts available');
   return SystemProgram.transfer({
     fromPubkey: payer,
     toPubkey: new PublicKey(tipAccount),
-    lamports: BLOXROUTE_TIP_LAMPORTS,
+    lamports: Math.floor(DEFAULT_TIP_AMOUNT_SOL * LAMPORTS_PER_SOL),
   });
 }
 
-/** Result shape from BloxRoute submit-batch (each item may have signature, error, submitted). */
-export interface BloxRouteBundleResult {
-  confirmed: boolean;
-  bundleHash?: string;
-  result?: unknown;
-  dropped?: boolean;
-  signatures?: string[];
-  simulationPassed?: boolean;
+/** Send bundle via BloxRoute (adds tip tx, submits batch). Returns { confirmed: true } on success. */
+export async function sendBloxRouteBundle(
+  bundle: VersionedTransaction[],
+  payer: Keypair
+): Promise<{ confirmed: boolean }> {
+  const service = new BloxRouteService(connection);
+  await service.sendBundle(bundle, payer);
+  return { confirmed: true };
 }
 
 /**
- * Submit a bundle via BloxRoute Trader API submit-batch.
- * See: https://docs.bloxroute.com/solana/trader-api/api-endpoints/core-endpoints/submit-batch
- * useBundle: true requires the last transaction to include a Tip instruction.
+ * BloxRoute Service - Handles bundle submission via BloxRoute
  */
-export async function sendBloxRouteBundle(
-  transactions: VersionedTransaction[]
-): Promise<BloxRouteBundleResult> {
+export class BloxRouteService {
+  private connection: Connection;
 
-  const baseUrl = BLOXROUTE_API_URL.replace(/\/$/, "");
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: BLOXROUTE_AUTH_HEADER,
-  };
-
-  const entries = transactions.map((tx) => ({
-    transaction: {
-      content: Buffer.from(tx.serialize()).toString("base64"),
-    },
-    skipPreFlight: true, // important for bundles
-  }));
-
-  // 1️⃣ Submit bundle (longer timeout: BloxRoute may take time to validate/simulate)
-  const { data } = await axios.post(
-    `${baseUrl}/api/v2/submit-batch`,
-    {
-      entries,
-      useBundle: true,
-      frontRunningProtection: true,
-    },
-    { headers, timeout: 60000 }
-  );
-
-  const bundleHash = data?.bundleHash;
-
-  if (!bundleHash) {
-    console.error("No bundleHash returned:", data);
-    return { confirmed: false };
+  constructor(connection: Connection) {
+    this.connection = connection;
   }
 
-  // 2️⃣ Poll bundle result
-  for (let i = 0; i < 12; i++) {
-    await new Promise(r => setTimeout(r, 1500));
-
-    const result = await axios.post(
-      `${baseUrl}/api/v2/bundle-result`,
-      { bundleHash },
-      { headers }
-    );
-
-    const status = result.data?.status;
-
-    if (status === "Confirmed") {
-      return {
-        confirmed: true,
-        bundleHash,
-        result: result.data,
-      };
+  /**
+   * Get random tip account
+   */
+  private getTipAccount(): string {
+    const randomIndex = Math.floor(Math.random() * BLOXROUTE_TIP_ACCOUNTS.length);
+    const tipAccount = BLOXROUTE_TIP_ACCOUNTS[randomIndex];
+    
+    if (!tipAccount) {
+      throw new Error('BloxRoute: no tip accounts available');
     }
-
-    if (status === "Failed") {
-      console.error("Bundle failed:", JSON.stringify(result.data));
-      return {
-        confirmed: false,
-        bundleHash,
-        result: result.data,
-      };
-    }
-
-    if (status === "Dropped") {
-      return {
-        confirmed: false,
-        bundleHash,
-        dropped: true,
-      };
-    }
+    
+    return tipAccount;
   }
 
-  return { confirmed: false, bundleHash };
+  /**
+   * Create tip transaction
+   */
+  private async createTipTransaction(payer: Keypair): Promise<VersionedTransaction> {
+    const tipAccount = this.getTipAccount();
+    const tipInstruction = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: new PublicKey(tipAccount),
+      lamports: Math.floor(DEFAULT_TIP_AMOUNT_SOL * LAMPORTS_PER_SOL)
+    });
+
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    
+    const messageV0 = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [tipInstruction]
+    }).compileToV0Message();
+
+    const transaction = new VersionedTransaction(messageV0);
+    transaction.sign([payer]);
+
+    return transaction;
+  }
+
+  /**
+   * Send bundle via BloxRoute
+   */
+  async sendBundle(transactions: VersionedTransaction[], payer: Keypair): Promise<void> {
+
+    // Simulate all transactions
+    // for (const tx of transactions) {
+    //   const simulatedTransaction = await this.connection.simulateTransaction(tx);
+    //   console.log("Simulated transaction:", simulatedTransaction);
+    // }
+    
+    const bundleTransactions = [...transactions];
+    const tipTransaction = await this.createTipTransaction(payer);
+    bundleTransactions.push(tipTransaction);
+
+    // Convert transactions to base64 strings
+    const entries = bundleTransactions.map(tx => {
+      const serializedTx = tx.serialize();
+      const base64Content = Buffer.from(serializedTx).toString('base64');
+      return {
+        transaction: {
+          content: base64Content
+        }
+      };
+    });
+
+    const requestBody = { entries };
+
+    const authToken = process.env.BLOXROUTE_AUTH_TOKEN;
+    if (!authToken) {
+      throw new Error('BLOXROUTE_AUTH_TOKEN environment variable not set');
+    }
+
+    try {
+      const response: AxiosResponse = await axios.post(
+        BLOXROUTE_SUBMIT_BATCH_URL,
+        requestBody,
+        {
+          headers: {
+            'Authorization': `${authToken}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (response.status >= 200 && response.status < 300) {
+        const signature = response.data?.transactions;
+        console.log('BloxRoute bundle submitted successfully:', signature);
+      } else {
+        const errorText = response.data || 'Unknown error';
+        throw new Error(`BloxRoute API error: ${response.status} - ${errorText}`);
+      }
+    } catch (error: any) {
+      if (error.response) {
+        const errorText = error.response.data || 'Unknown error';
+        throw new Error(`BloxRoute API error: ${error.response.status} - ${errorText}`);
+      } else {
+        throw new Error(`BloxRoute request failed: ${error.message}`);
+      }
+    }
+  }
 }

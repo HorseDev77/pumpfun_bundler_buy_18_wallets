@@ -2,6 +2,7 @@ import {
   PumpSdk,
   OnlinePumpSdk,
   getBuyTokenAmountFromSolAmount,
+  newBondingCurve,
   bondingCurvePda,
   BONDING_CURVE_NEW_SIZE,
   PUMP_PROGRAM_ID,
@@ -75,7 +76,10 @@ export async function getTokenProgramForMint(mint: PublicKey): Promise<PublicKey
   return info.owner;
 }
 
-/** Create token only (no buy). Creator gets ATA. Run this first, then create ATAs for bundler, then dev buy by bundler. */
+/**
+ * Create token only (no buy). Creator gets ATA.
+ * Uses Pump SDK createV2 (Token-22 mint) + extend + create ATA, same pattern as sdk.createV2AndBuyInstructions.
+ */
 export async function createTokenOnlyInstructions(
   mint: PublicKey,
   creator: PublicKey
@@ -175,23 +179,47 @@ export async function buyInstructionsForUser(
  * When ataAlreadyCreated is true, only the buy instruction is returned (no create ATA).
  * Fetches global and the token's bonding curve from chain so fee recipient matches the
  * program (getFeeRecipient(global, bondingCurve.isMayhemMode)).
+ * When curveNotYetOnChain is true (e.g. token created in same bundle), uses initial curve
+ * from global and provided creator instead of fetching the curve from chain.
  */
 export async function buyInstructionsForUserInBundle(
   mint: PublicKey,
-  _creator: PublicKey,
+  creator: PublicKey,
   user: PublicKey,
   solAmountSol: number,
-  opts?: { ataAlreadyCreated?: boolean; feeRecipient?: PublicKey; tokenProgram?: PublicKey }
+  opts?: {
+    ataAlreadyCreated?: boolean;
+    feeRecipient?: PublicKey;
+    tokenProgram?: PublicKey;
+    /** When true, token is created in same bundle so curve does not exist yet; use initial curve and creator param */
+    curveNotYetOnChain?: boolean;
+  }
 ): Promise<{ instructions: import("@solana/web3.js").TransactionInstruction[] }> {
   const tokenProgram = opts?.tokenProgram ?? (await getTokenProgramForMint(mint));
-  const [global, curveAccountInfo] = await Promise.all([
-    fetchGlobal(),
-    connection.getAccountInfo(bondingCurvePda(mint)),
-  ]);
-  if (!curveAccountInfo) {
-    throw new Error(`Bonding curve not found for mint: ${mint.toBase58()}`);
+  const global = await fetchGlobal();
+
+  let curveAccountInfo: import("@solana/web3.js").AccountInfo<Buffer>;
+  let bondingCurve: import("@pump-fun/pump-sdk").BondingCurve;
+
+  if (opts?.curveNotYetOnChain) {
+    bondingCurve = newBondingCurve(global);
+    bondingCurve.creator = creator;
+    bondingCurve.isMayhemMode = false;
+    curveAccountInfo = {
+      data: Buffer.alloc(BONDING_CURVE_NEW_SIZE),
+      executable: false,
+      owner: PUMP_PROGRAM_ID,
+      lamports: 0,
+      rentEpoch: 0,
+    };
+  } else {
+    const info = await connection.getAccountInfo(bondingCurvePda(mint));
+    if (!info) {
+      throw new Error(`Bonding curve not found for mint: ${mint.toBase58()}`);
+    }
+    curveAccountInfo = info;
+    bondingCurve = sdk.decodeBondingCurve(curveAccountInfo);
   }
-  const bondingCurve = sdk.decodeBondingCurve(curveAccountInfo);
 
   const solAmountLamports = new BN(Math.floor(solAmountSol * LAMPORTS_PER_SOL));
   const amount = getBuyTokenAmountFromSolAmount({

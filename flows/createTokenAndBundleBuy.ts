@@ -36,7 +36,7 @@ import {
   TOKEN_2022_PROGRAM_ID,
 } from "../services/ata";
 import { sendJitoBundle, getJitoTipInstruction } from "../services/jito";
-import { sendBloxRouteBundle } from "../services/bloxroute";
+import { getBloxRouteTipInstruction, sendBloxRouteBundle } from "../services/bloxroute";
 import {
   readBundlerWallets,
   readData,
@@ -49,10 +49,10 @@ import { connection, BUNDLER_WALLET_COUNT, isMainnet, SOL_DISTRIBUTE_MAX, SOL_DI
 import { init } from "../index";
 
 const COMPUTE_UNIT_LIMIT = 400_000;
-const COMPUTE_UNIT_PRICE = 100_000;
+const COMPUTE_UNIT_PRICE = 10_000;
 /** Total wallets in bundle: 20. Each tx has 5 wallets (create ATA + buy). So 4 txs for 20 wallets. */
-const TOTAL_BUNDLE_WALLETS = 5;
-const WALLETS_PER_TX = 5;
+const TOTAL_BUNDLE_WALLETS = 4;
+const WALLETS_PER_TX = 4;
 /** Min SOL so after distribution main wallet can pay LUT create/extend, create token (incl. metadata rent), create-ATA+buy fees, and Jito tip on mainnet. +0.25 prevents "Custom 12" (insufficient lamports) on metadata allocation. */
 const MIN_MAIN_BALANCE_SOL = (SOL_DISTRIBUTE_MAX + 0.005) * BUNDLER_WALLET_COUNT + 0.25;
 
@@ -75,8 +75,8 @@ export async function runCreateTokenAndBundleBuy() {
   console.log("Bundler wallets:", bundlerKeypairs.length);
 
   console.log("\nDistributing SOL to bundler wallets...");
-  // await distributeSolToWallets(mainWallet, bundlerKeypairs);
-  // await sleep(1000);
+ // await distributeSolToWallets(mainWallet, bundlerKeypairs);
+  //await sleep(1000);
 
   let mintKeypair = loadMintKeypair();
   if (!mintKeypair) {
@@ -151,10 +151,9 @@ export async function runCreateTokenAndBundleBuy() {
     mainWallet.publicKey
   );
   const createTokenInstructions = [
-    ...(isMainnet && BUNDLE_PROVIDER === "jito" ? [getJitoTipInstruction(mainWallet.publicKey)] : []),
     ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
-    ...createTokenIx.instructions,
+    ...createTokenIx.instructions
   ];
 
   const createTokenMsg = new TransactionMessage({
@@ -181,7 +180,7 @@ export async function runCreateTokenAndBundleBuy() {
     const chunk = walletSlice.slice(t, t + WALLETS_PER_TX);
     const isLastTx = t + WALLETS_PER_TX >= TOTAL_BUNDLE_WALLETS;
     const createAtaAndBuyInstructions: TransactionInstruction[] = [
-      //...(isMainnet && BUNDLE_PROVIDER === "bloxroute" && isLastTx ? [getJitoTipInstruction(mainWallet.publicKey)] : []),
+      ...(isMainnet && isLastTx ? [getBloxRouteTipInstruction(mainWallet.publicKey)] : []),
     ];
     for (let i = 0; i < chunk.length; i++) {
       const w = chunk[i];
@@ -197,7 +196,7 @@ export async function runCreateTokenAndBundleBuy() {
         mainWallet.publicKey,
         w.publicKey,
         solAmt,
-        { ataAlreadyCreated: true, feeRecipient: bundleFeeRecipient }
+        { ataAlreadyCreated: true, feeRecipient: bundleFeeRecipient, tokenProgram: TOKEN_2022_PROGRAM_ID, curveNotYetOnChain: true }
       );
       createAtaAndBuyInstructions.push(...createAtaIxs, ...buyIxs);
     }
@@ -225,11 +224,33 @@ export async function runCreateTokenAndBundleBuy() {
 
   const cluster = process.env.CLUSTER ?? "devnet";
   if (cluster === "mainnet") {
+
+
+    console.log("Simulating first tx on mainnet RPC...");
+    try {
+      const sim = await connection.simulateTransaction(createTokenTx, {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+      });
+      const err = sim.value.err;
+      const logs = sim.value.logs ?? [];4
+      if (err) {
+        console.error("Mainnet simulation FAILED:", typeof err === "object" ? JSON.stringify(err, null, 2) : err);
+        if (logs.length) console.error("Logs:\n" + logs.join("\n"));
+        console.error("Fix: check CU limit, bundler wallet SOL, PDAs, and slippage. Then retry.");
+        mainMenuWait(init);
+        return;
+      }
+      console.log("Mainnet simulation OK. Units consumed:", (sim as { value?: { unitsConsumed?: number } }).value?.unitsConsumed ?? "N/A");
+    } catch (e) {
+      console.error("Mainnet simulation threw:", e instanceof Error ? e.message : e);
+      mainMenuWait(init);
+      return;
+    }
+
+    
     console.log("Sending bundle via", BUNDLE_PROVIDER === "bloxroute" ? "BloxRoute" : "Jito", "...");
-    const result =
-      BUNDLE_PROVIDER === "bloxroute"
-        ? await sendBloxRouteBundle(bundle)
-        : await sendJitoBundle(bundle, mainWallet);
+    const result = await sendBloxRouteBundle(bundle, mainWallet)
     if (result.confirmed) {
       data.mintPublicKey = mintKeypair.publicKey.toBase58();
       data.created = true;
